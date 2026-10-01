@@ -1,0 +1,91 @@
+diff --git a/crates/zkie-core/vendor/p3-merkle-tree/src/lib.rs b/crates/zkie-core/vendor/p3-merkle-tree/src/lib.rs
+index 0e0f09f..8fb3554 100644
+--- a/crates/zkie-core/vendor/p3-merkle-tree/src/lib.rs
++++ b/crates/zkie-core/vendor/p3-merkle-tree/src/lib.rs
+@@ -13,3 +13,8 @@ pub use merkle_tree::MerkleTree;
+ pub use mmcs::{MerkleTreeError, MerkleTreeMmcs, PrunedBatchOpening, PrunedProofError};
+ pub use p3_symmetric::MerkleCap;
+ pub use pruning::{MerkleAuthPath, PrunedMerklePaths};
++
++/// MEASUREMENT HOOK (zkIE on-chain cost study, 2026-10-01): Poseidon2 permutation counts performed by the pruned multiproof verifier.
++pub static HASH_PERMS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static COMPRESS_PERMS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static HASH_ELEMS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+diff --git a/crates/zkie-core/vendor/p3-merkle-tree/src/mmcs/mod.rs b/crates/zkie-core/vendor/p3-merkle-tree/src/mmcs/mod.rs
+index cdddd0a..c37e22b 100644
+--- a/crates/zkie-core/vendor/p3-merkle-tree/src/mmcs/mod.rs
++++ b/crates/zkie-core/vendor/p3-merkle-tree/src/mmcs/mod.rs
+@@ -630,11 +630,17 @@ impl<P, PW, H, C, const N: usize, const DIGEST_ELEMS: usize>
+         let mut digests: Vec<[PW::Value; DIGEST_ELEMS]> = reps
+             .iter()
+             .map(|&rep| {
+-                self.hash.hash_iter_slices(
+-                    leaf_matrix_indices
+-                        .iter()
+-                        .map(|&mi| opened_values[rep][mi].as_ref()),
+-                )
++                {
++                    let tot = core::cell::Cell::new(0u64);
++                    let d = self.hash.hash_iter_slices(
++                        leaf_matrix_indices
++                            .iter()
++                            .map(|&mi| { let sl = opened_values[rep][mi].as_ref(); tot.set(tot.get() + sl.len() as u64); sl }),
++                    );
++                    crate::HASH_ELEMS.fetch_add(tot.get(), core::sync::atomic::Ordering::Relaxed);
++                    crate::HASH_PERMS.fetch_add(tot.get().div_ceil(8).max(1), core::sync::atomic::Ordering::Relaxed);
++                    d
++                }
+             })
+             .collect();
+ 
+@@ -756,6 +762,7 @@ impl<P, PW, H, C, const N: usize, const DIGEST_ELEMS: usize>
+                     }
+                 }
+ 
++                crate::COMPRESS_PERMS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                 new_digests.push(self.compress.compress(inputs));
+                 new_indices.push(parent_idx);
+                 new_lead.push(lead_path);
+@@ -814,11 +821,14 @@ impl<P, PW, H, C, const N: usize, const DIGEST_ELEMS: usize>
+                         }
+                     }
+ 
++                    let tot = core::cell::Cell::new(0u64);
+                     let next_height_digest = self.hash.hash_iter_slices(
+                         inject_matrix_indices
+                             .iter()
+-                            .map(|&mi| opened_values[rep_orig][mi].as_ref()),
++                            .map(|&mi| { let sl = opened_values[rep_orig][mi].as_ref(); tot.set(tot.get() + sl.len() as u64); sl }),
+                     );
++                    crate::HASH_ELEMS.fetch_add(tot.get(), core::sync::atomic::Ordering::Relaxed);
++                    crate::HASH_PERMS.fetch_add(tot.get().div_ceil(8).max(1), core::sync::atomic::Ordering::Relaxed);
+ 
+                     let inject_inputs: [_; N] = core::array::from_fn(|k| {
+                         if k == 0 {
+@@ -829,6 +839,7 @@ impl<P, PW, H, C, const N: usize, const DIGEST_ELEMS: usize>
+                             default_digest
+                         }
+                     });
++                    crate::COMPRESS_PERMS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                     digests[g] = self.compress.compress(inject_inputs);
+                 }
+             }
+diff --git a/crates/zkie-core/examples/whir_sizes.rs b/crates/zkie-core/examples/whir_sizes.rs
+index be97ba2..1274bbc 100644
+--- a/crates/zkie-core/examples/whir_sizes.rs
++++ b/crates/zkie-core/examples/whir_sizes.rs
+@@ -55,10 +55,14 @@ fn main() {
+         let t1 = std::time::Instant::now();
+         let (proof, val) = whir.open(pd, &proto, &point);
+         let to = t1.elapsed().as_secs_f64();
++        use std::sync::atomic::Ordering::Relaxed;
++        p3_merkle_tree::HASH_PERMS.store(0, Relaxed); p3_merkle_tree::COMPRESS_PERMS.store(0, Relaxed); p3_merkle_tree::HASH_ELEMS.store(0, Relaxed);
+         let t2 = std::time::Instant::now();
+         let v = whir.verify(&commitment, &proof, &proto, &point).expect("verify");
+         let tv = t2.elapsed().as_secs_f64();
+         assert_eq!(v, val);
++        let (hp, cp, he) = (p3_merkle_tree::HASH_PERMS.load(Relaxed), p3_merkle_tree::COMPRESS_PERMS.load(Relaxed), p3_merkle_tree::HASH_ELEMS.load(Relaxed));
++        println!("   VERIFIER WORK n={n}: leaf-hash perms {hp} ({he} field elems hashed) + path compress perms {cp} = {} Poseidon2-16 permutations total", hp + cp);
+         let proof_bytes = bincode::serialize(&proof).unwrap().len();
+         let commit_bytes = bincode::serialize(&commitment).unwrap().len();
+         println!("REAL n={n}: commit {tc:.2}s open {to:.2}s verify(native) {tv:.3}s | proof {proof_bytes} bytes ({:.1} KB) commitment {commit_bytes} bytes", proof_bytes as f64 / 1024.0);
