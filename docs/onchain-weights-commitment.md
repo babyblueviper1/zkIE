@@ -70,18 +70,52 @@ Poseidon2 challenger would add its own permutations per observed commitment and 
 2. **Weights-binding on-chain (3 to 5 M gas).** A second WHIR instance for weights only, with a Keccak Merkle tree and a Keccak challenger
    (weights are static, so prover cost is unaffected). The contract checks `eval(weights, r) == y` for a claimed `(r, y)` against the registered
    root. It does not re-derive `r` from the main transcript; that part stays attested until phase 3.
-3. **Trustless inference verification.** Wrap the whole verification in a succinct proof checked on-chain. Out of scope here; the
-   verifier-side re-run of the forward pass (zkIE#14) has to go first.
+3. **Trustless inference verification.** Wrap the whole verification in a succinct proof checked on-chain. Out of scope here. The
+   prerequisite is a verifier refactor, not new commitments. Today every verifier entry point recomputes the witness, and @Echo-Merlini
+   measured verify at 90 % of prove at seq=512. Wrapping it as written would put the whole forward pass in the circuit. Two steps unblock
+   it:
+   - A claim-driven verifier. Each op takes a claim on its output and returns claims on its inputs, walked in reverse until the claims land
+     on committed tensors. `verify_same_poly` already receives the reduced `merged_eval` (`same_poly.rs:54`) but recomputes it from the
+     full tensor.
+   - A claim-transfer rule for the payload-free `OpProof` variants: Transpose, Scale, ScaleVec, ScaleGate, Relu, SoftmaxIndex, GeluIndex
+     and StableSoftmaxIndex. Transpose is free (a relabelling). The other seven need a rounding remainder, a product sumcheck or a lookup.
+     The set is enumerable by the compiler: an exhaustive-match guard pinning it at eight is on #26 (`e46f35e`, @Echo-Merlini).
 
 To keep the on-chain work to one opening per commitment, merge all weight claims into one before opening: `same_poly` for claims on one
 polynomial and `open_batch_multi` for several.
+
+### 5.1 How many commitments: shard granularity trades memory against openings, not time
+
+One commitment per cross-shard boundary means the shard count sets the on-chain cost. @Echo-Merlini measured the other side of the trade
+on DeepSeek-V2-Lite, seq=512, 20 038 ops, one node, with `glibc.malloc.trim_threshold=131072` (job 1980235). The memory and forward
+columns are measured. The opening columns are derived from §2-§4: 115 KB per WHIR opening at 2^22 and 4 M gas per Keccak opening.
+
+| ops/shard | shards | RssAnon | forward | boundaries | proof @115 KB | Keccak gas |
+|---|---|---|---|---|---|---|
+| 2872 | 7 | 40.85 GiB | 1274 s | 6 | 0.67 MB | 24 M |
+| 1436 | 14 | 25.52 GiB | 1263 s | 13 | 1.46 MB | 52 M |
+| 718 | 28 | 17.46 GiB | 1282 s | 27 | 3.03 MB | 108 M |
+| 359 | 56 | 13.95 GiB | 1280 s | 55 | 6.18 MB | 220 M |
+| 180 | 112 | 10.55 GiB | 1280 s | 111 | 12.47 MB | 444 M |
+
+- **Forward time is flat:** a 1.5 % spread over a 16x change in shard count. `forward_shard` runs `ops[..shard.end]`, so the last shard
+  recomputes nearly the whole graph whatever the granularity.
+- **Use the coarsest sharding the node's memory allows.** On a 242 GiB x86 node that is 7 shards: 6 openings, 0.67 MB, about 24 M gas.
+  A 29 GiB A64FX node needs 14 shards: 13 openings, 1.46 MB, about 52 M gas (untested: no ARM allocation).
+- **Size nodes from `RssAnon`, not peak RSS.** Peak (72-87 GiB, unordered) tracks page-cache residency of the mmap'd weights. Quoting it
+  overstates the 718-ops row about 5x.
+- The 718-ops row matches two independent jobs to 0.7 % (17.58 GiB, job 1979955; 17.61 GiB forward plus prove, job 1980234).
+
+Combined with phase 2, a full model on commodity x86 costs about 24 M gas (6 openings at 4 M each), with the claims merged per boundary
+as above.
 
 ## 6. Questions for the maintainers
 
 - Is a second, Keccak-based PCS instance for static weights acceptable, or must everything stay on Poseidon2?
 - PoW budget for large `n`: raise `DEFAULT_MAX_POW` for the weights instance (cost lands on the prover per opening), or cap commitments at n <= 25
   (13 shards for GPT-2 fit: a layer is about 7.1 M parameters, n=23)?
-- One commitment per shard, or a few per model, given the n <= 25 limit?
+- One commitment per shard, or a few per model, given the n <= 25 limit? (§5.1 suggests as few as the node's memory allows. Is
+  memory-driven sharding the intended default, or is there a prover-side reason to shard finer?)
 
 ## 7. Reproduce
 
