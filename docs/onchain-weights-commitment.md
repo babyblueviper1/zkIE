@@ -127,10 +127,13 @@ opening) and are contingent on the claim-driven verifier above.
 Combined with phase 2, a full model on commodity x86 costs about 24 M gas (6 openings at 4 M each), with the claims merged per boundary
 as above.
 
-**Where the wrap circuit's cost is (Option C, phase 3).** Field elements per op, one GPT-2 layer as one shard (@Echo-Merlini's sizer):
-Projection 299 fe/op (10 ops), Layernorm 309 (2), Softmax 296 (2), Lookup 165 (1), MatMul 15 (4), Add 18 (3), Transpose and
-SoftmaxIndex 0. Projection, Layernorm and Softmax carry 93 % of the proof, a 20x spread over MatMul and Add, so they are the whole
-target for wrap-circuit cost; MatMul is noise. The sizer counts information content, not wire size: do not quote these as calldata.
+**Where the wrap circuit's cost is (Option C, phase 3).** Whole-model measurement, 12-layer GPT-2, seq=512, 2114 ops, verifying
+proof (@Echo-Merlini, zkIE #28, `proof_size.rs`): 7.79 MiB of field elements in total, 1.2 % spread across a 193x change in shard
+count. Projection is 60.8 % (600 ops, 1032 fe/op) and Softmax 21.1 % (144 ops, 1494 fe/op), so those two are the wrap target.
+LayerNormCentered is 3.9 %, Lookup 2.0 %, and MatMul 1.6 % (289 ops including `lm_head`, 49 fe/op, because sumcheck rounds scale
+with log size). 41 % of the graph's ops (876 of 2114: Scale 576, StableSoftmaxIndex 144, Transpose 144, GeluIndex 12) carry no
+proof at all today, so the wrap's coverage is bounded by those rules being written. The sizer counts information content,
+not wire size: do not quote these as calldata.
 
 ## 6. Questions for the maintainers
 
