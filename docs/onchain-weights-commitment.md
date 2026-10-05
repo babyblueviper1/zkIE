@@ -91,9 +91,22 @@ polynomial and `open_batch_multi` for several.
 
 ### 5.1 How many commitments: shard granularity trades memory against openings, not time
 
-One commitment per cross-shard boundary means the shard count sets the on-chain cost. @Echo-Merlini measured the other side of the trade
-on DeepSeek-V2-Lite, seq=512, 20 038 ops, one node, with `glibc.malloc.trim_threshold=131072` (job 1980235). The memory and forward
-columns are measured. The opening columns are derived from §2-§4: 115 KB per WHIR opening at 2^22 and 4 M gas per Keccak opening.
+**Precondition (corrected 2026-10-05 from @Echo-Merlini's proof sizer, `crates/zkie-ops/src/proof_size.rs`).** The opening columns
+below describe the design this proposal needs, not the code as it stands:
+
+- In the plain `ShardDagProof` path, proof size does not depend on granularity. One GPT-2 layer (27 ops) proven at 1, 4, 7, 14 and 27
+  shards measures 41.0-41.7 K field-element bytes, a 1.5 % spread over a 27x change in shard count. The `same_poly` work moves from
+  within-shard to cross-shard binds (368 -> 0 and 0 -> 368); it does not grow.
+- In `CommittedShardDagProof`, commitments are per boundary, but `Committed` carries the prover's Merkle tree (`prover_data`), so it
+  is not a wire object. The openings are opened, checked and dropped (`committed_cross_bind`). `verify_committed_cross_bind` re-opens
+  from `prover_data`, the same witness-driven pattern as `verify_shard_dag`.
+- So the 115 KB per opening applies only once the verifier is claim-driven and openings are shipped. The ordering is: claim-driven
+  verifier -> openings become wire objects -> granularity becomes a proof-size question -> the memory-versus-openings optimum below exists.
+
+One commitment per cross-shard boundary then means the shard count sets the on-chain cost. @Echo-Merlini measured the other side of the
+trade on DeepSeek-V2-Lite, seq=512, 20 038 ops, one node, with `glibc.malloc.trim_threshold=131072` (job 1980235). The memory and
+forward columns are measured. The opening columns are derived from §2-§4 (115 KB per WHIR opening at 2^22, 4 M gas per Keccak
+opening) and are contingent on the claim-driven verifier above.
 
 | ops/shard | shards | RssAnon | forward | boundaries | proof @115 KB | Keccak gas |
 |---|---|---|---|---|---|---|
@@ -113,6 +126,11 @@ columns are measured. The opening columns are derived from §2-§4: 115 KB per W
 
 Combined with phase 2, a full model on commodity x86 costs about 24 M gas (6 openings at 4 M each), with the claims merged per boundary
 as above.
+
+**Where the wrap circuit's cost is (Option C, phase 3).** Field elements per op, one GPT-2 layer as one shard (@Echo-Merlini's sizer):
+Projection 299 fe/op (10 ops), Layernorm 309 (2), Softmax 296 (2), Lookup 165 (1), MatMul 15 (4), Add 18 (3), Transpose and
+SoftmaxIndex 0. Projection, Layernorm and Softmax carry 93 % of the proof, a 20x spread over MatMul and Add, so they are the whole
+target for wrap-circuit cost; MatMul is noise. The sizer counts information content, not wire size: do not quote these as calldata.
 
 ## 6. Questions for the maintainers
 
