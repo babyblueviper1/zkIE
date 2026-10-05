@@ -81,6 +81,11 @@ Poseidon2 challenger would add its own permutations per observed commitment and 
      and StableSoftmaxIndex. Transpose is free (a relabelling). The other seven need a rounding remainder, a product sumcheck or a lookup.
      The set is enumerable by the compiler: an exhaustive-match guard pinning it at eight is on #26 (`e46f35e`, @Echo-Merlini).
 
+   **Decided 2026-10-05 (@JimmyShi22):** of the three wrap mechanisms this PR's #15 thread discussed — field-bridging, a weight claim
+   over Fr, or a Groth16/Plonk wrap with the Poseidon2 weights root as a public input (all ~0.25-0.3 M gas once the claim-driven
+   verifier above exists) — Option C (the Groth16/Plonk wrap) is the one to validate first. Field-bridging and the Fr weight-claim
+   stay open as longer-term directions, not ruled out.
+
 To keep the on-chain work to one opening per commitment, merge all weight claims into one before opening: `same_poly` for claims on one
 polynomial and `open_batch_multi` for several.
 
@@ -116,6 +121,10 @@ as above.
   (13 shards for GPT-2 fit: a layer is about 7.1 M parameters, n=23)?
 - One commitment per shard, or a few per model, given the n <= 25 limit? (§5.1 suggests as few as the node's memory allows. Is
   memory-driven sharding the intended default, or is there a prover-side reason to shard finer?)
+- Now that Option C (phase 3, §5 point 3) is the near-term path: which Groth16/Plonk stack should the wrap target — an
+  arkworks-native circuit (stays in the existing Rust toolchain) or a circom/gnark path (more EVM tooling, separate toolchain)?
+  Either way the curve is BN254 for the on-chain verifier; the choice decides whether the circuit is written against this repo's
+  own types or exported to a separate circuit DSL.
 
 ## 7. Reproduce
 
